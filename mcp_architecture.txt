@@ -1,0 +1,186 @@
+MCP Architecture - Component Description
+==========================================
+
+┌─────────────────────────────────────────────┐
+│  Agent (Kiro / Claude / Cursor)             │
+└──────────────────┬──────────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────────┐
+│  MCP Client SDK                             │
+└──────────────────┬──────────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────────┐
+│  MCP Server                                 │
+└─────────────────────────────────────────────┘
+
+
+===========================================================================
+COMPONENT 1: Agent (Kiro / Claude / Cursor)
+===========================================================================
+
+What it is:
+    The AI assistant or IDE that the user interacts with directly.
+    Examples: Kiro, Claude Desktop, Cursor, VS Code Copilot, Claude Code.
+
+What it does:
+    - Receives user queries like "how do I create an agent with LangGraph?"
+    - Decides which MCP tool to call based on the user's intent
+    - Passes the tool name and arguments down to the MCP Client SDK
+    - Receives structured results back and formats them for the user
+    - Has no knowledge of HTTP, JSON-RPC, or session management
+
+Analogy:
+    The driver of a car. They decide where to go and press the pedal.
+    They don't manage fuel injection or transmission — that's the engine's job.
+
+Example:
+    User asks: "Show me how to build a RAG pipeline"
+    Agent decides: I should call search_docs_by_lang_chain with query "RAG pipeline"
+    Agent calls:  session.call_tool("search_docs_by_lang_chain", {"query": "RAG pipeline"})
+
+
+===========================================================================
+COMPONENT 2: MCP Client SDK
+===========================================================================
+
+What it is:
+    A library/package that sits between the Agent and the MCP Server.
+    It handles all protocol-level communication so the Agent doesn't have to.
+
+    Python:     pip install mcp
+    TypeScript: npm install @modelcontextprotocol/sdk
+
+What it does:
+    - Auto-initialized on first connect:
+        When the Agent first tries to use a tool, the SDK automatically sends
+        the "initialize" JSON-RPC request and the "notifications/initialized"
+        message. The Agent never sees this happen.
+
+    - Caches tool definitions:
+        After connecting, it calls "tools/list" once, stores all tool names,
+        descriptions, and input schemas in memory. The Agent can then call
+        any tool by name without re-fetching the list.
+
+    - Handles JSON-RPC framing:
+        Wraps every tool call into the proper JSON-RPC 2.0 format:
+        {
+            "jsonrpc": "2.0",
+            "id": <auto-incremented>,
+            "method": "tools/call",
+            "params": {"name": "...", "arguments": {...}}
+        }
+        The Agent just says call_tool(name, args) — the SDK builds the envelope.
+
+    - Parses SSE responses:
+        If the server responds with text/event-stream (Server-Sent Events),
+        the SDK parses the "data: {...}" lines and extracts the JSON payload.
+        The Agent receives clean structured data, never raw SSE text.
+
+    - Manages session ID header:
+        If the server returns an Mcp-Session-Id header during initialize,
+        the SDK stores it and attaches it to every subsequent request.
+        If the server doesn't use sessions (like LangChain's), it simply
+        skips this — no error, no issue.
+
+    - Maintains persistent session:
+        Keeps the connection context alive for the duration of the Agent's
+        runtime. No need to re-initialize on every tool call.
+
+Analogy:
+    The car's engine and transmission. The driver (Agent) just presses the
+    gas pedal. The engine handles fuel injection, gear shifting, and power
+    delivery to the wheels. The driver doesn't think about any of that.
+
+Example (what the SDK does internally when Agent calls call_tool):
+    1. Check if initialized → if not, send initialize + notifications/initialized
+    2. Check if tools are cached → if not, call tools/list and cache them
+    3. Build JSON-RPC payload for tools/call
+    4. POST to https://docs.langchain.com/mcp with proper headers
+    5. Parse response (JSON or SSE)
+    6. Return clean result to Agent
+
+
+===========================================================================
+COMPONENT 3: MCP Server (https://docs.langchain.com/mcp)
+===========================================================================
+
+What it is:
+    A remote HTTP endpoint that exposes documentation as searchable tools.
+    Hosted by Mintlify on behalf of LangChain.
+
+What it does:
+    - Listens for incoming POST requests at a single URL
+    - Accepts JSON-RPC 2.0 messages
+    - Responds to protocol methods:
+        * "initialize"       → returns server info and capability flags
+        * "tools/list"       → returns full tool definitions with schemas
+        * "tools/call"       → executes a tool and returns results
+        * "resources/list"   → returns available resources (docs, skills)
+
+    - Exposes two tools:
+        1. search_docs_by_lang_chain
+           - Semantic search across all LangChain documentation
+           - Input: {"query": "string"}
+           - Returns: matching doc snippets with titles and links
+
+        2. query_docs_filesystem_docs_by_lang_chain
+           - Virtual read-only filesystem of .mdx documentation pages
+           - Input: {"command": "shell command string"}
+           - Supports: cat, head, tail, tree, ls, rg, grep, find, etc.
+           - Returns: command output (file contents, search results, etc.)
+
+    - Is completely stateless:
+        * No session tracking
+        * No memory between requests
+        * Each request is independent
+        * No authentication required (public docs)
+
+Analogy:
+    A library's reference desk. You walk up, ask a question, get an answer,
+    and walk away. The librarian doesn't remember you next time you come back.
+    But they have access to every book in the library and can find anything.
+
+Example:
+    Receives:
+        POST /mcp
+        {"jsonrpc":"2.0","id":3,"method":"tools/call",
+         "params":{"name":"search_docs_by_lang_chain",
+                   "arguments":{"query":"how to create an agent"}}}
+
+    Returns:
+        {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"..."}]}}
+
+
+===========================================================================
+DATA FLOW SUMMARY
+===========================================================================
+
+    User: "How do I build a RAG pipeline with LangChain?"
+         │
+         ▼
+    Agent: Decides to search docs → calls session.call_tool(...)
+         │
+         ▼
+    MCP Client SDK:
+         - Builds JSON-RPC payload
+         - POSTs to https://docs.langchain.com/mcp
+         - Parses SSE/JSON response
+         │
+         ▼
+    MCP Server:
+         - Receives tools/call request
+         - Searches documentation index
+         - Returns matching content
+         │
+         ▼
+    MCP Client SDK:
+         - Extracts result from JSON-RPC response
+         - Returns structured data to Agent
+         │
+         ▼
+    Agent: Formats results and presents to user
+         │
+         ▼
+    User: Sees relevant documentation about RAG pipelines

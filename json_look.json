@@ -1,0 +1,20 @@
+{
+  "Date": "Sun, 24 May 2026 12:10:42 GMT",
+  "Content-Type": "text/event-stream",
+  "Transfer-Encoding": "chunked",
+  "Connection": "keep-alive",
+  "CF-Ray": "a00c32da1cd079e7-HYD",
+  "CF-Cache-Status": "DYNAMIC",
+  "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+  "Expires": "0",
+  "Server": "cloudflare",
+  "Strict-Transport-Security": "max-age=63072000",
+  "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch",
+  "Pragma": "no-cache",
+  "X-Mint-Proxy-Version": "1.0.0-prod",
+  "content-security-policy": "worker-src * blob: data: 'unsafe-eval' 'unsafe-inline'; object-src data: ; base-uri 'self'; upgrade-insecure-requests; frame-ancestors 'self' https://dashboard.mintlify.com https://app.mintlify.com; form-action 'self' https://codesandbox.io;",
+  "x-frame-options": "DENY",
+  "x-matched-path": "/_mintlify/mcp/[subdomain]/[transport]",
+  "x-vercel-cache": "MISS",
+  "x-vercel-id": "bom1::iad1::rfll2-1779624641663-3201767bc50c"
+}

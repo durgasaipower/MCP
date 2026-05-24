@@ -1,0 +1,537 @@
+================================================================================
+ARCHITECTURE: LangChain Docs MCP Server - RAG & Search Documentation System
+================================================================================
+
+Server URL:  https://docs.langchain.com/mcp
+Hosted by:   Mintlify
+Protocol:    MCP (Model Context Protocol) over Streamable HTTP
+Transport:   HTTP POST with JSON-RPC 2.0
+Endpoint:    Single endpoint at /mcp
+Total Pages: 1,377 .mdx files
+
+
+================================================================================
+SECTION 1: HIGH-LEVEL ARCHITECTURE
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         USER / AI AGENT                                      │
+│  (Kiro, Claude, Cursor, Custom App)                                         │
+└────────────────────────────────────┬────────────────────────────────────────┘
+                                     │
+                                     │  MCP Protocol (JSON-RPC 2.0 over HTTP)
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     MINTLIFY MCP GATEWAY                                     │
+│                                                                             │
+│  URL: https://docs.langchain.com/mcp                                        │
+│  Proxy: X-Mint-Proxy-Version: 1.0.0-prod                                   │
+│  CDN: Cloudflare                                                            │
+│  Hosting: Vercel                                                            │
+│  Route: /_mintlify/mcp/[subdomain]/[transport]                              │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                        TOOL ROUTER                                    │  │
+│  │                                                                       │  │
+│  │  Receives tools/call → routes to appropriate backend                  │  │
+│  └───────────┬───────────────────────────────────┬───────────────────────┘  │
+│              │                                   │                           │
+│              ▼                                   ▼                           │
+│  ┌─────────────────────────┐       ┌─────────────────────────────────────┐  │
+│  │   SEARCH ENGINE (RAG)   │       │   VIRTUAL FILESYSTEM                │  │
+│  │                         │       │                                     │  │
+│  │  Tool: search_docs_by_  │       │  Tool: query_docs_filesystem_       │  │
+│  │        lang_chain       │       │        docs_by_lang_chain           │  │
+│  │                         │       │                                     │  │
+│  │  - Semantic search      │       │  - In-memory .mdx file store        │  │
+│  │  - Keyword matching     │       │  - Shell command emulation          │  │
+│  │  - Indexed 1,377 pages  │       │  - Read-only sandbox                │  │
+│  │  - Returns snippets +   │       │  - Supports: cat, head, rg, tree,  │  │
+│  │    links                │       │    ls, find, grep, jq, etc.         │  │
+│  └─────────────────────────┘       └─────────────────────────────────────┘  │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                     RESOURCES STORE                                    │  │
+│  │                                                                       │  │
+│  │  URI: mintlify://skills/langchain                                     │  │
+│  │  Content: Guidance on LangChain vs LangGraph vs Deep Agents           │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     DOCUMENTATION SOURCE                                     │
+│                                                                             │
+│  GitHub: https://github.com/langchain-ai/docs                               │
+│  Format: .mdx files (Markdown + JSX)                                        │
+│  Index:  https://docs.langchain.com/llms.txt                                │
+│  Build:  Mintlify processes and indexes on deploy                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+SECTION 2: TOOLS - DETAILED DESCRIPTION
+================================================================================
+
+───────────────────────────────────────────────────────────────────────────────
+TOOL 1: search_docs_by_lang_chain
+───────────────────────────────────────────────────────────────────────────────
+
+PURPOSE:
+    Semantic and keyword search across the entire LangChain documentation
+    knowledge base (1,377 pages). This is the RAG retrieval component.
+
+HOW IT WORKS (Internal - RAG Pipeline):
+    1. User query comes in: "how to create an agent"
+    2. Query is embedded/processed for matching
+    3. Searched against pre-indexed documentation chunks
+    4. Top-K relevant chunks are retrieved and ranked
+    5. Results formatted with titles, snippets, and page links
+    6. Returned to the caller
+
+INPUT:
+    {
+        "query": "string"  (required)
+    }
+
+OUTPUT:
+    {
+        "content": [
+            {
+                "type": "text",
+                "text": "<markdown formatted search results with titles, snippets, links>"
+            }
+        ]
+    }
+
+WHEN TO USE:
+    - Broad conceptual questions ("how do I...")
+    - Finding tutorials, guides, examples
+    - API reference lookups
+    - Discovery (don't know the exact page path)
+
+
+───────────────────────────────────────────────────────────────────────────────
+TOOL 2: query_docs_filesystem_docs_by_lang_chain
+───────────────────────────────────────────────────────────────────────────────
+
+PURPOSE:
+    Direct read-only access to all 1,377 documentation pages via a
+    virtualized in-memory filesystem. Execute shell commands to explore,
+    read, and search the docs.
+
+INPUT:
+    {
+        "command": "string"  (required)
+    }
+
+    Supported commands:
+        tree, ls, cat, head, tail, rg, grep, find, stat, wc,
+        sort, uniq, cut, sed, awk, jq
+
+    NOT supported: writes, network, process control
+
+OUTPUT:
+    {
+        "content": [
+            {
+                "type": "text",
+                "text": "<command stdout/stderr output as plain text>"
+            }
+        ]
+    }
+
+    Output truncated at 30KB per call. Each call is STATELESS.
+
+WHEN TO USE:
+    - Reading full page content by path
+    - Exploring directory structure
+    - Exact keyword/regex matching (rg)
+    - Reading OpenAPI specs
+    - After search, to get full page content
+
+
+───────────────────────────────────────────────────────────────────────────────
+RESOURCE: mintlify://skills/langchain
+───────────────────────────────────────────────────────────────────────────────
+
+    Markdown guidance on when to use:
+    - LangChain: High-level agent abstractions
+    - LangGraph: Low-level orchestration, memory, human-in-the-loop
+    - Deep Agents: Batteries-included agent capabilities
+
+
+================================================================================
+SECTION 3: ACTUAL DOCUMENTATION STRUCTURE (from live server)
+================================================================================
+
+Total: 1,377 .mdx files across 4 top-level sections
+
+/                                       ← Root
+├── index.mdx                           ← Homepage/landing
+├── api-reference/                      ← LangGraph Platform API (v2)
+│   ├── agent-connections-v2/           ← Agent connection endpoints
+│   ├── auth-service-v2/                ← OAuth, auth providers
+│   ├── deployments-v2/                 ← Deploy/manage agents
+│   ├── integrations-v1/                ← GitHub integrations
+│   └── listeners-v2/                   ← Event listeners
+│
+├── langsmith/                          ← LangSmith platform docs (354 files)
+│   ├── home.mdx                        ← LangSmith overview
+│   ├── observability*.mdx              ← Tracing, monitoring
+│   ├── evaluation*.mdx                 ← Testing, scoring agents
+│   ├── prompt-engineering*.mdx         ← Prompt management
+│   ├── deployment*.mdx                 ← Deploying agents
+│   ├── agent-server*.mdx              ← Agent server (LangGraph Platform)
+│   ├── fleet/                          ← Fleet (no-code agents)
+│   │   ├── quickstart.mdx
+│   │   ├── tools.mdx
+│   │   ├── skills.mdx
+│   │   ├── mcp-framework.mdx
+│   │   └── ...
+│   ├── smith-api/                      ← LangSmith REST API reference
+│   │   ├── auth/
+│   │   ├── datasets/
+│   │   ├── examples/
+│   │   ├── feedback/
+│   │   ├── runs/
+│   │   ├── orgs/
+│   │   └── ... (many more)
+│   ├── agent-server-api/               ← Agent Server API reference
+│   │   ├── assistants/
+│   │   ├── threads/
+│   │   ├── thread-runs/
+│   │   ├── crons/
+│   │   ├── store/
+│   │   ├── mcp/
+│   │   └── streaming/
+│   ├── managed-deep-agents-api/        ← Deep Agents API
+│   │   ├── agents/
+│   │   ├── mcp-servers/
+│   │   ├── runs/
+│   │   └── threads/
+│   ├── self-host*.mdx                  ← Self-hosting guides
+│   ├── trace-with-*.mdx               ← Integration tracing guides
+│   │   (openai, anthropic, langgraph, crewai, pydantic-ai, etc.)
+│   └── ...
+│
+├── oss/                                ← Open Source frameworks (231 files)
+│   ├── python/                         ← Python ecosystem
+│   │   ├── langchain/                  ← LangChain Python
+│   │   │   ├── quickstart.mdx
+│   │   │   ├── overview.mdx
+│   │   │   ├── agents.mdx
+│   │   │   ├── rag.mdx
+│   │   │   ├── retrieval.mdx
+│   │   │   ├── tools.mdx
+│   │   │   ├── models.mdx
+│   │   │   ├── streaming.mdx
+│   │   │   ├── structured-output.mdx
+│   │   │   ├── human-in-the-loop.mdx
+│   │   │   ├── long-term-memory.mdx
+│   │   │   ├── short-term-memory.mdx
+│   │   │   ├── mcp.mdx
+│   │   │   ├── multi-agent/
+│   │   │   ├── middleware/
+│   │   │   ├── frontend/
+│   │   │   └── ...
+│   │   ├── langgraph/                  ← LangGraph Python
+│   │   │   ├── quickstart.mdx
+│   │   │   ├── overview.mdx
+│   │   │   ├── graph-api.mdx
+│   │   │   ├── functional-api.mdx
+│   │   │   ├── persistence.mdx
+│   │   │   ├── streaming.mdx
+│   │   │   ├── interrupts.mdx
+│   │   │   ├── add-memory.mdx
+│   │   │   ├── agentic-rag.mdx
+│   │   │   ├── durable-execution.mdx
+│   │   │   ├── thinking-in-langgraph.mdx
+│   │   │   ├── workflows-agents.mdx
+│   │   │   └── ...
+│   │   ├── deepagents/                 ← Deep Agents Python
+│   │   │   ├── quickstart.mdx
+│   │   │   ├── overview.mdx
+│   │   │   ├── skills.mdx
+│   │   │   ├── mcp.mdx
+│   │   │   ├── memory.mdx
+│   │   │   ├── human-in-the-loop.mdx
+│   │   │   ├── subagents.mdx
+│   │   │   └── ...
+│   │   ├── integrations/               ← Provider integrations
+│   │   │   ├── chat/                   ← Chat model providers
+│   │   │   ├── embeddings/             ← Embedding providers
+│   │   │   ├── vectorstores/           ← Vector DB integrations
+│   │   │   ├── retrievers/             ← Retriever integrations
+│   │   │   ├── tools/                  ← Tool integrations
+│   │   │   ├── document_loaders/       ← Doc loader integrations
+│   │   │   ├── splitters/              ← Text splitter integrations
+│   │   │   └── ...
+│   │   ├── concepts/                   ← Core concepts
+│   │   │   ├── context.mdx
+│   │   │   ├── memory.mdx
+│   │   │   ├── products.mdx
+│   │   │   └── providers-and-models.mdx
+│   │   ├── reference/                  ← API reference links
+│   │   ├── contributing/               ← Contribution guides
+│   │   ├── migrate/                    ← Migration guides
+│   │   └── releases/                   ← Changelogs
+│   │
+│   └── javascript/                     ← JavaScript/TypeScript ecosystem
+│       ├── langchain/                  ← (same structure as python)
+│       ├── langgraph/
+│       ├── deepagents/
+│       ├── integrations/
+│       ├── concepts/
+│       ├── reference/
+│       ├── contributing/
+│       ├── migrate/
+│       └── releases/
+│
+└── openapi/                            ← OpenAPI specifications
+    ├── langsmith/                      ← LangSmith API spec
+    └── https:/                         ← External API specs
+
+
+================================================================================
+SECTION 4: HOW RAG WORKS IN THIS SYSTEM
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    RAG PIPELINE (inside the MCP server)                       │
+│                                                                             │
+│  ┌─────────────┐    ┌──────────────────┐    ┌────────────────────────────┐  │
+│  │  INGESTION  │    │    INDEXING       │    │      RETRIEVAL             │  │
+│  │             │    │                  │    │                            │  │
+│  │ 1,377 .mdx  │───▶│ Chunk documents  │───▶│ Query comes in             │  │
+│  │ files from  │    │ Create embeddings│    │ Search index               │  │
+│  │ GitHub repo │    │ Build search     │    │ Rank results               │  │
+│  │ on deploy   │    │ index            │    │ Return top-K chunks        │  │
+│  └─────────────┘    └──────────────────┘    └────────────────────────────┘  │
+│                                                                             │
+│  Triggered on:        Stored in:             Called via:                     │
+│  Git push /           Mintlify's             search_docs_by_lang_chain       │
+│  deploy               infrastructure         tool                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+The MCP server IS the retriever. The LLM/agent is the generator.
+Together they form a complete RAG system.
+
+
+================================================================================
+SECTION 5: SEARCH vs FILESYSTEM - WHEN TO USE WHICH
+================================================================================
+
+┌─────────────────────────────────────┬────────────────────────────────────────┐
+│  search_docs_by_lang_chain          │  query_docs_filesystem                 │
+├─────────────────────────────────────┼────────────────────────────────────────┤
+│  "How do I build a RAG pipeline?"   │  "cat /oss/python/langchain/rag.mdx"   │
+│  Semantic understanding             │  Exact path/keyword lookup             │
+│  Fuzzy matching                     │  Precise matching (regex)              │
+│  Returns snippets + links           │  Returns raw file content              │
+│  Good for discovery                 │  Good for reading known pages          │
+│  Like Google Search                 │  Like a file explorer / terminal       │
+│  Best first step                    │  Best second step (after search)       │
+└─────────────────────────────────────┴────────────────────────────────────────┘
+
+Typical workflow:
+    1. search_docs_by_lang_chain("RAG tutorial")
+       → Returns: "Found: /oss/python/langchain/rag.mdx ..."
+
+    2. query_docs_filesystem("cat /oss/python/langchain/rag.mdx")
+       → Returns: Full page content with all code examples
+
+
+================================================================================
+SECTION 6: KEY DOCUMENTATION PAGES (by topic)
+================================================================================
+
+GETTING STARTED:
+    /oss/python/langchain/quickstart.mdx
+    /oss/python/langgraph/quickstart.mdx
+    /oss/python/deepagents/quickstart.mdx
+    /oss/javascript/langchain/quickstart.mdx
+    /oss/javascript/langgraph/quickstart.mdx
+
+AGENTS:
+    /oss/python/langchain/agents.mdx
+    /oss/python/langgraph/workflows-agents.mdx
+    /oss/python/deepagents/overview.mdx
+    /langsmith/agent-server.mdx
+    /langsmith/agent-auth.mdx
+
+RAG (Retrieval-Augmented Generation):
+    /oss/python/langchain/rag.mdx
+    /oss/python/langchain/retrieval.mdx
+    /oss/python/langgraph/agentic-rag.mdx
+    /oss/python/langchain/knowledge-base.mdx
+
+TOOLS & MCP:
+    /oss/python/langchain/tools.mdx
+    /oss/python/langchain/mcp.mdx
+    /oss/python/deepagents/mcp.mdx
+    /langsmith/server-mcp.mdx
+    /langsmith/langsmith-mcp-server.mdx
+    /langsmith/langsmith-remote-mcp.mdx
+    /langsmith/fleet/mcp-framework.mdx
+
+MEMORY:
+    /oss/python/langchain/long-term-memory.mdx
+    /oss/python/langchain/short-term-memory.mdx
+    /oss/python/langgraph/add-memory.mdx
+    /oss/python/langgraph/persistence.mdx
+    /oss/python/deepagents/memory.mdx
+
+EVALUATION:
+    /langsmith/evaluation.mdx
+    /langsmith/evaluation-quickstart.mdx
+    /langsmith/evaluation-concepts.mdx
+    /langsmith/evaluators.mdx
+    /langsmith/llm-as-judge.mdx
+
+DEPLOYMENT:
+    /langsmith/deployment.mdx
+    /langsmith/deployment-quickstart.mdx
+    /langsmith/deploy-to-cloud.mdx
+    /langsmith/deploy-standalone-server.mdx
+    /oss/python/langchain/deploy.mdx
+    /oss/python/langgraph/deploy.mdx
+
+OBSERVABILITY:
+    /langsmith/observability.mdx
+    /langsmith/observability-quickstart.mdx
+    /langsmith/trace-with-langchain.mdx
+    /langsmith/trace-with-langgraph.mdx
+    /langsmith/trace-with-openai.mdx
+
+STREAMING:
+    /oss/python/langchain/streaming.mdx
+    /oss/python/langgraph/streaming.mdx
+    /oss/python/langgraph/event-streaming.mdx
+    /langsmith/streaming.mdx
+
+INTEGRATIONS (Python):
+    /oss/python/integrations/chat/          ← Chat model providers
+    /oss/python/integrations/embeddings/    ← Embedding providers
+    /oss/python/integrations/vectorstores/  ← Vector databases
+    /oss/python/integrations/retrievers/    ← Retriever implementations
+    /oss/python/integrations/tools/         ← Tool integrations
+    /oss/python/integrations/document_loaders/
+    /oss/python/integrations/splitters/
+
+
+================================================================================
+SECTION 7: PROTOCOL FLOW
+================================================================================
+
+    Client                              Server (docs.langchain.com/mcp)
+      │                                    │
+      │── POST {initialize} ──────────────▶│
+      │◀── {serverInfo, capabilities} ─────│
+      │                                    │
+      │── POST {notifications/initialized}▶│
+      │◀── (202 accepted) ────────────────│
+      │                                    │
+      │── POST {tools/list} ──────────────▶│
+      │◀── {tools: [2 tools]} ────────────│
+      │                                    │
+      │── POST {tools/call: search} ──────▶│
+      │◀── SSE: data: {content:[...]} ────│
+      │                                    │
+      │── POST {tools/call: filesystem} ──▶│
+      │◀── SSE: data: {content:[...]} ────│
+
+    Response: text/event-stream (SSE, chunked)
+    Session: Stateless (no Mcp-Session-Id)
+    Auth: None (public)
+
+
+================================================================================
+SECTION 8: HOW TO BUILD SOMETHING SIMILAR
+================================================================================
+
+To replicate this for your own documentation:
+
+    1. CONTENT LAYER
+       - Store docs as .mdx or .md files in a Git repo
+       - Organize in logical folder hierarchy
+       - Each file = one documentation page
+
+    2. SEARCH/RAG LAYER (for search tool)
+       - Chunk documents into segments (by heading, paragraph, etc.)
+       - Create embeddings (OpenAI, Cohere, etc.)
+       - Store in vector DB (ChromaDB, Pinecone, Weaviate, etc.)
+       - Re-index on every git push / deploy
+       - Implement search: query → embed → similarity search → rank → return
+
+    3. FILESYSTEM LAYER (for filesystem tool)
+       - Load all .mdx files into memory as virtual filesystem
+       - Implement command parser for: tree, ls, cat, head, rg, find, etc.
+       - Return stdout-like output
+       - Keep it read-only and stateless
+
+    4. MCP SERVER LAYER
+       - Use MCP SDK:
+           Python:     from mcp.server.fastmcp import FastMCP
+           TypeScript: import { McpServer } from "@modelcontextprotocol/sdk"
+       - Define 2 tools with proper schemas
+       - Serve over Streamable HTTP transport
+
+    5. DEPLOYMENT
+       - Host on Vercel / Cloudflare Workers / AWS Lambda
+       - Put behind CDN
+       - Single /mcp endpoint
+       - No auth needed for public docs
+
+    Minimal Python example:
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("My Docs Server")
+
+        @mcp.tool()
+        def search_docs(query: str) -> str:
+            # Your RAG retrieval logic here
+            results = vector_db.similarity_search(query, k=5)
+            return format_results(results)
+
+        @mcp.tool()
+        def query_filesystem(command: str) -> str:
+            # Your virtual filesystem logic here
+            return execute_virtual_command(command)
+
+        mcp.run(transport="streamable-http", port=8000)
+
+
+================================================================================
+SECTION 9: INFRASTRUCTURE DETAILS (from response headers)
+================================================================================
+
+    CDN:            Cloudflare (CF-Ray, CF-Cache-Status: DYNAMIC)
+    Hosting:        Vercel (x-vercel-id, x-vercel-cache: MISS)
+    Proxy:          Mintlify Proxy v1.0.0-prod
+    Cache:          no-store, no-cache, must-revalidate (always fresh)
+    Security:       HSTS max-age=63072000, X-Frame-Options: DENY
+    Route:          /_mintlify/mcp/[subdomain]/[transport]
+    Response:       text/event-stream (SSE), chunked encoding
+    Region:         Served from BOM1 (Mumbai) → IAD1 (Virginia)
+
+
+================================================================================
+SECTION 10: URL MAPPING
+================================================================================
+
+    Virtual filesystem path → Web URL:
+        /oss/python/langchain/rag.mdx
+        → https://docs.langchain.com/oss/python/langchain/rag
+
+        /langsmith/evaluation.mdx
+        → https://docs.langchain.com/langsmith/evaluation
+
+        /api-reference/deployments-v2/create-deployment.mdx
+        → https://docs.langchain.com/api-reference/deployments-v2/create-deployment
+
+    Rule: Remove .mdx extension, prepend https://docs.langchain.com
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================

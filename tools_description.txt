@@ -1,0 +1,226 @@
+LangChain MCP Server - Tools Reference
+========================================
+
+Server URL: https://docs.langchain.com/mcp
+Transport:  HTTP (Streamable HTTP)
+Protocol:   JSON-RPC 2.0
+
+
+===========================================================================
+TOOL 1: search_docs_by_lang_chain
+===========================================================================
+
+Description:
+    Search across the LangChain documentation knowledge base to find relevant
+    information, code examples, API references, and guides. Use this tool when
+    you need to answer questions about LangChain, LangGraph, or LangSmith,
+    find specific documentation, understand how features work, or locate
+    implementation details. The search returns contextual content with titles
+    and direct links to the documentation pages.
+
+When to use:
+    - Broad or conceptual queries ("how to authenticate", "what is RAG")
+    - Finding tutorials, guides, or code examples
+    - Looking up API references
+    - Understanding how a feature works
+    - Getting started with a new concept
+
+Input Schema:
+    {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "A query to search the content with."
+        }
+      },
+      "required": ["query"]
+    }
+
+    Parameters:
+        query (string, required):
+            A natural language search query. Can be a question, keyword,
+            or phrase describing what you're looking for.
+
+    Examples:
+        {"query": "how to create an agent with LangGraph"}
+        {"query": "RAG pipeline tutorial"}
+        {"query": "rate limiting"}
+        {"query": "ChatOpenAI API reference"}
+
+Output Schema:
+    The response is a JSON-RPC result containing a "content" array.
+    Each item in the array has:
+
+    {
+      "content": [
+        {
+          "type": "text",
+          "text": "<markdown formatted search results>"
+        }
+      ]
+    }
+
+    The text field contains markdown-formatted results including:
+        - Page titles
+        - Relevant text snippets/excerpts
+        - Direct links (URL paths) to documentation pages
+        - Code examples when relevant
+
+    Example output (text field content):
+        ## Results for "RAG pipeline"
+
+        ### [Building a RAG Pipeline](/tutorials/rag)
+        Learn how to build a retrieval-augmented generation pipeline
+        using LangChain's document loaders, text splitters, and retrievers...
+
+        ### [RAG Quickstart](/quickstart/rag)
+        A minimal example showing how to set up RAG in 10 lines of code...
+
+
+===========================================================================
+TOOL 2: query_docs_filesystem_docs_by_lang_chain
+===========================================================================
+
+Description:
+    Run a read-only shell-like query against a virtualized, in-memory
+    filesystem rooted at "/" that contains ONLY the LangChain documentation
+    pages and OpenAPI specs. This is NOT a shell on any real machine — nothing
+    runs on the user's computer, the server host, or any network. The
+    filesystem is a sandbox backed by documentation chunks.
+
+    This is how you read documentation pages: there is no separate "get page"
+    tool. To read a page, pass its .mdx path to "head" or "cat". To search
+    the docs with exact keyword or regex matches, use "rg". To understand
+    the docs structure, use "tree" or "ls".
+
+When to use:
+    - Reading the full content of a specific documentation page
+    - Exploring the directory structure of the docs
+    - Exact keyword or regex matching across all docs
+    - Reading OpenAPI specs
+    - When you already know the page path from a previous search
+
+    Workflow tip: Use search_docs_by_lang_chain first for broad queries,
+    then use this tool to read the full page content of specific results.
+
+Input Schema:
+    {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "A shell command to run against the virtualized documentation filesystem."
+        }
+      },
+      "required": ["command"]
+    }
+
+    Parameters:
+        command (string, required):
+            A shell command to execute against the virtual filesystem.
+            The filesystem resets to "/" on every call (stateless).
+
+    Supported commands:
+        rg (ripgrep)  - Fast regex search across files
+        grep          - Pattern matching
+        find          - Find files by name/pattern
+        tree          - Display directory structure
+        ls            - List directory contents
+        cat           - Read entire file
+        head          - Read first N lines of a file
+        tail          - Read last N lines of a file
+        stat          - File metadata
+        wc            - Word/line count
+        sort          - Sort lines
+        uniq          - Deduplicate lines
+        cut           - Extract columns
+        sed           - Stream editing
+        awk           - Pattern processing
+        jq            - JSON processing
+
+    NOT supported:
+        - Write operations (no mkdir, touch, echo >, etc.)
+        - Network operations (no curl, wget, etc.)
+        - Process control (no kill, ps, etc.)
+        - Any destructive commands
+
+    Examples:
+        {"command": "tree / -L 2"}
+        {"command": "ls /"}
+        {"command": "head -80 /quickstart.mdx"}
+        {"command": "cat /api-reference/create-customer.mdx"}
+        {"command": "head -80 /quickstart.mdx /installation.mdx"}
+        {"command": "rg -il \"rate limit\" /"}
+        {"command": "rg -C 3 \"apiKey\" /api-reference/"}
+        {"command": "cat /openapi/spec.json | jq '.paths | keys'"}
+        {"command": "cd /api-reference && ls"}
+
+Output Schema:
+    The response is a JSON-RPC result containing a "content" array.
+    Each item in the array has:
+
+    {
+      "content": [
+        {
+          "type": "text",
+          "text": "<command output as plain text>"
+        }
+      ]
+    }
+
+    The text field contains the stdout of the command, exactly as you'd
+    see in a terminal. Output is truncated to 30KB per call.
+
+    Example output for "tree / -L 1":
+        /
+        ├── quickstart.mdx
+        ├── installation.mdx
+        ├── tutorials/
+        ├── guides/
+        ├── api-reference/
+        ├── concepts/
+        └── openapi/
+
+    Example output for "head -5 /quickstart.mdx":
+        ---
+        title: Quickstart
+        description: Get started with LangChain in 5 minutes
+        ---
+
+        # Quickstart
+
+    Example output for "rg -il \"agent\" /":
+        /tutorials/agents.mdx
+        /guides/agent-architectures.mdx
+        /concepts/agents.mdx
+        /api-reference/langgraph/create-agent.mdx
+
+
+===========================================================================
+COMPARISON: When to use which tool
+===========================================================================
+
+    | Scenario                              | Tool to use                    |
+    |---------------------------------------|--------------------------------|
+    | "How do I do X?"                      | search_docs_by_lang_chain      |
+    | Find tutorials about a topic          | search_docs_by_lang_chain      |
+    | Read a specific page by path          | query_docs_filesystem          |
+    | See what pages/sections exist          | query_docs_filesystem          |
+    | Find exact code pattern across docs   | query_docs_filesystem (rg)     |
+    | Get API reference details             | search first, then filesystem  |
+    | Explore OpenAPI spec                  | query_docs_filesystem (jq)     |
+
+
+===========================================================================
+NOTES
+===========================================================================
+
+- File paths in the virtual filesystem use .mdx extension
+- When referencing pages to users, remove .mdx to get the URL path:
+    /quickstart.mdx → https://docs.langchain.com/quickstart
+    /api-reference/overview.mdx → https://docs.langchain.com/api-reference/overview
+- Each filesystem call is STATELESS: working directory resets to /
+- Prefer "head -N" over "cat" for large files to avoid truncation
+- Batch multiple file reads: "head -80 /file1.mdx /file2.mdx /file3.mdx"
+- Use "rg -C 3" for context lines around matches

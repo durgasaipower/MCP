@@ -1,0 +1,443 @@
+================================================================================
+HIGH-LEVEL DESIGN (HLD): Custom Documentation MCP Server
+================================================================================
+
+Project: MCP-powered Documentation Search & Retrieval Platform
+Version: 1.0.0
+
+
+================================================================================
+SECTION 1: OVERVIEW
+================================================================================
+
+A self-hosted MCP server that allows clients (LLMs, agents, IDEs) to:
+    1. Search documentation via RAG (semantic vector search)
+    2. Browse/read documentation via a virtual filesystem
+    3. Upload new documents via a REST endpoint (non-MCP)
+
+The system ingests documents into S3, automatically chunks and embeds them
+into a vector database, and exposes the content through MCP tools.
+
+
+================================================================================
+SECTION 2: SYSTEM ARCHITECTURE
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           CLIENTS                                            │
+│                                                                             │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────────────┐   │
+│  │  LLM +   │  │  Kiro /  │  │  Custom  │  │  Admin (Upload Client)   │   │
+│  │  Agent   │  │  Cursor  │  │  App     │  │  (REST, not MCP)         │   │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────────────┬─────────────┘   │
+│       │              │              │                     │                  │
+└───────┼──────────────┼──────────────┼─────────────────────┼──────────────────┘
+        │              │              │                     │
+        │   MCP Protocol (tools/call) │                     │  REST (POST /upload)
+        │              │              │                     │
+        ▼              ▼              ▼                     ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        MCP SERVER (ECS Fargate / Lambda)                      │
+│                                                                             │
+│  Endpoint: https://docs.example.com/mcp                                     │
+│  Upload:   https://docs.example.com/upload                                  │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                     ENDPOINTS                                         │  │
+│  │                                                                       │  │
+│  │  POST /mcp          ← MCP protocol (JSON-RPC 2.0)                    │  │
+│  │                       Handles: initialize, tools/list, tools/call     │  │
+│  │                                                                       │  │
+│  │  POST /upload       ← REST endpoint (multipart/form-data)             │  │
+│  │                       Accepts: file upload + metadata                  │  │
+│  │                       Auth: API key or JWT                            │  │
+│  │                                                                       │  │
+│  │  GET  /health       ← Health check                                    │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                     MCP TOOLS                                         │  │
+│  │                                                                       │  │
+│  │  ┌─────────────────────────┐    ┌─────────────────────────────────┐  │  │
+│  │  │  TOOL 1: rag_search    │    │  TOOL 2: query_filesystem       │  │  │
+│  │  │                         │    │                                 │  │  │
+│  │  │  Input: {query: str}    │    │  Input: {command: str}          │  │  │
+│  │  │                         │    │                                 │  │  │
+│  │  │  - Embeds query         │    │  - Parses shell command         │  │  │
+│  │  │  - Searches vector DB   │    │  - Reads from S3/cache          │  │  │
+│  │  │  - Returns top-K        │    │  - Returns file content         │  │  │
+│  │  │    chunks with metadata │    │  - Supports: cat, head, ls,     │  │  │
+│  │  │                         │    │    tree, rg, find               │  │  │
+│  │  └────────────┬────────────┘    └──────────────┬──────────────────┘  │  │
+│  │               │                                │                      │  │
+│  └───────────────┼────────────────────────────────┼──────────────────────┘  │
+│                  │                                │                          │
+└──────────────────┼────────────────────────────────┼──────────────────────────┘
+                   │                                │
+                   ▼                                ▼
+┌──────────────────────────────┐    ┌──────────────────────────────────────────┐
+│       VECTOR DATABASE        │    │              AWS S3                       │
+│    (OpenSearch / Pinecone    │    │                                          │
+│     / pgvector)              │    │  Bucket: docs-mcp-content                │
+│                              │    │                                          │
+│  - Stores embeddings         │    │  /documents/                             │
+│  - Stores chunk text         │    │    ├── guides/                           │
+│  - Stores metadata           │    │    │   ├── quickstart.md                 │
+│    (source, title, path)     │    │    │   └── advanced.md                   │
+│  - Similarity search         │    │    ├── api-reference/                    │
+│                              │    │    │   └── endpoints.md                  │
+│                              │    │    └── index.json  ← file registry       │
+│                              │    │                                          │
+└──────────────────────────────┘    └──────────────────┬───────────────────────┘
+                                                       │
+                                                       │ S3 Event Notification
+                                                       │ (on PutObject)
+                                                       ▼
+                                    ┌──────────────────────────────────────────┐
+                                    │     INGESTION PIPELINE                    │
+                                    │     (Lambda or Fargate Task)              │
+                                    │                                          │
+                                    │  Triggered by: S3 PutObject event        │
+                                    │                                          │
+                                    │  Steps:                                  │
+                                    │  1. Download new file from S3            │
+                                    │  2. Parse content (md, mdx, txt, pdf)    │
+                                    │  3. Chunk into segments                  │
+                                    │     (by heading / fixed size / semantic) │
+                                    │  4. Generate embeddings                  │
+                                    │     (OpenAI / Bedrock / Cohere)          │
+                                    │  5. Upsert chunks into vector DB         │
+                                    │  6. Update index.json in S3              │
+                                    │                                          │
+                                    └──────────────────────────────────────────┘
+
+
+================================================================================
+SECTION 3: DATA FLOW
+================================================================================
+
+FLOW A: Document Upload (Admin)
+─────────────────────────────────
+
+    Admin Client                    MCP Server              S3              Lambda/Fargate        Vector DB
+        │                              │                    │                    │                    │
+        │── POST /upload ─────────────▶│                    │                    │                    │
+        │   (file + metadata)          │                    │                    │                    │
+        │                              │── PutObject ──────▶│                    │                    │
+        │                              │── Update index.json▶│                    │                    │
+        │◀── 200 {path, status} ───────│                    │                    │                    │
+        │                              │                    │── S3 Event ────────▶│                    │
+        │                              │                    │                    │── Read file ──────▶│
+        │                              │                    │                    │   (from S3)        │
+        │                              │                    │                    │── Chunk ──────────▶│
+        │                              │                    │                    │── Embed ──────────▶│
+        │                              │                    │                    │── Upsert ─────────▶│
+        │                              │                    │                    │                    │
+
+
+FLOW B: RAG Search (Client via MCP)
+─────────────────────────────────────
+
+    Client/Agent                    MCP Server                          Vector DB
+        │                              │                                    │
+        │── tools/call: rag_search ───▶│                                    │
+        │   {query: "how to auth"}     │── embed query ────────────────────▶│
+        │                              │◀── top-K similar chunks ───────────│
+        │                              │                                    │
+        │                              │── format results ──────────────────│
+        │◀── {content: [...]} ─────────│                                    │
+
+
+FLOW C: Filesystem Query (Client via MCP)
+──────────────────────────────────────────
+
+    Client/Agent                    MCP Server                          S3 / Cache
+        │                              │                                    │
+        │── tools/call: query_fs ─────▶│                                    │
+        │   {command: "cat /guide.md"} │── read file ──────────────────────▶│
+        │                              │◀── file content ───────────────────│
+        │                              │                                    │
+        │◀── {content: [...]} ─────────│                                    │
+
+
+================================================================================
+SECTION 4: COMPONENT DETAILS
+================================================================================
+
+───────────────────────────────────────────────────────────────────────────────
+4.1 MCP SERVER
+───────────────────────────────────────────────────────────────────────────────
+
+    Runtime:        Python (FastMCP + uvicorn)
+    Deployment:     ECS Fargate (or Lambda with streaming)
+    Port:           8000
+    Endpoints:
+        POST /mcp       → MCP protocol handler
+        POST /upload    → File upload REST endpoint
+        GET  /health    → Health check
+
+    Tools exposed:
+        1. rag_search(query: str) → str
+        2. query_filesystem(command: str) → str
+
+
+───────────────────────────────────────────────────────────────────────────────
+4.2 TOOL 1: rag_search
+───────────────────────────────────────────────────────────────────────────────
+
+    Purpose:    Semantic search across all uploaded documentation
+    Input:      {"query": "string"}
+    Output:     Markdown-formatted results with titles, snippets, paths
+
+    Internal flow:
+        1. Receive query string
+        2. Generate embedding using same model as ingestion
+        3. Query vector DB for top-K similar chunks (k=5 default)
+        4. Format results: title, snippet, source path, relevance score
+        5. Return as markdown text
+
+    Vector DB schema per chunk:
+        {
+            "id": "uuid",
+            "embedding": [float, ...],    ← 1536-dim (OpenAI) or similar
+            "text": "chunk content...",
+            "metadata": {
+                "source_path": "/guides/quickstart.md",
+                "title": "Quickstart Guide",
+                "heading": "## Installation",
+                "chunk_index": 3,
+                "uploaded_at": "2026-05-24T12:00:00Z"
+            }
+        }
+
+
+───────────────────────────────────────────────────────────────────────────────
+4.3 TOOL 2: query_filesystem
+───────────────────────────────────────────────────────────────────────────────
+
+    Purpose:    Read/browse documentation files directly
+    Input:      {"command": "string"}
+    Output:     Plain text command output
+
+    Supported commands:
+        tree [path] -L [depth]      → directory structure
+        ls [path]                   → list directory
+        cat [path]                  → read full file
+        head -N [path]              → first N lines
+        tail -N [path]              → last N lines
+        find [path] -name [pattern] → find files
+        rg [pattern] [path]         → regex search across files
+        wc [path]                   → word/line count
+
+    Data source:
+        - Reads from S3 (with local cache for performance)
+        - Uses index.json to know file structure
+        - Stateless: each call starts fresh at /
+
+    index.json format (stored in S3):
+        {
+            "files": [
+                {"path": "/guides/quickstart.md", "title": "Quickstart", "size": 4523},
+                {"path": "/guides/advanced.md", "title": "Advanced Guide", "size": 8901},
+                {"path": "/api-reference/endpoints.md", "title": "API Endpoints", "size": 3200}
+            ],
+            "last_updated": "2026-05-24T12:00:00Z",
+            "total_files": 3
+        }
+
+
+───────────────────────────────────────────────────────────────────────────────
+4.4 UPLOAD ENDPOINT (REST, not MCP)
+───────────────────────────────────────────────────────────────────────────────
+
+    Endpoint:   POST /upload
+    Auth:       API key in header (X-API-Key)
+    Content:    multipart/form-data
+
+    Request:
+        Headers:
+            X-API-Key: <api-key>
+            Content-Type: multipart/form-data
+
+        Body:
+            file: <binary file content>
+            path: "/guides/new-guide.md"       (target path in filesystem)
+            title: "New Guide"                 (optional metadata)
+
+    Response:
+        {
+            "status": "uploaded",
+            "path": "/guides/new-guide.md",
+            "s3_key": "documents/guides/new-guide.md",
+            "message": "File uploaded. Indexing will complete in ~30 seconds."
+        }
+
+    Internal flow:
+        1. Validate API key
+        2. Upload file to S3 at documents/<path>
+        3. Update index.json in S3
+        4. Return success (indexing happens async via S3 trigger)
+
+
+───────────────────────────────────────────────────────────────────────────────
+4.5 INGESTION PIPELINE (Lambda / Fargate)
+───────────────────────────────────────────────────────────────────────────────
+
+    Trigger:    S3 PutObject event on docs-mcp-content bucket
+    Runtime:    Python Lambda (or Fargate for large files)
+
+    Steps:
+        1. Receive S3 event → get bucket + key
+        2. Download file from S3
+        3. Detect format (md, mdx, txt, pdf)
+        4. Parse content → extract text
+        5. Chunk text:
+            - Split by headings (## / ###)
+            - Max chunk size: 1000 tokens
+            - Overlap: 100 tokens
+        6. Generate embeddings for each chunk
+            - Model: OpenAI text-embedding-3-small (or Bedrock Titan)
+        7. Upsert into vector DB:
+            - Delete old chunks for same source_path (replace)
+            - Insert new chunks with metadata
+        8. Log completion
+
+
+───────────────────────────────────────────────────────────────────────────────
+4.6 VECTOR DATABASE
+───────────────────────────────────────────────────────────────────────────────
+
+    Options (pick one):
+        - Amazon OpenSearch Serverless (with vector engine)
+        - PostgreSQL + pgvector (on RDS)
+        - Pinecone (managed, external)
+
+    Schema:
+        Collection/Index: "doc_chunks"
+        Fields:
+            id:          UUID
+            embedding:   vector(1536)
+            text:        string (chunk content)
+            source_path: string ("/guides/quickstart.md")
+            title:       string
+            heading:     string (section heading)
+            chunk_index: integer
+            uploaded_at: timestamp
+
+
+================================================================================
+SECTION 5: AWS INFRASTRUCTURE (CDK)
+================================================================================
+
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                        AWS ACCOUNT                                    │
+    │                                                                     │
+    │  ┌─────────────────────────────────────────────────────────────┐   │
+    │  │  VPC                                                         │   │
+    │  │                                                             │   │
+    │  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  │   │
+    │  │  │ ECS Fargate   │  │ Lambda        │  │ RDS/OpenSearch│  │   │
+    │  │  │ (MCP Server)  │  │ (Ingestion)   │  │ (Vector DB)   │  │   │
+    │  │  └───────┬───────┘  └───────┬───────┘  └───────────────┘  │   │
+    │  │          │                  │                               │   │
+    │  └──────────┼──────────────────┼───────────────────────────────┘   │
+    │             │                  │                                    │
+    │  ┌──────────┴──────────┐  ┌───┴───────────────┐                   │
+    │  │  ALB               │  │  S3 Bucket         │                   │
+    │  │  (Load Balancer)   │  │  (docs-mcp-content)│                   │
+    │  └──────────┬──────────┘  └───────────────────┘                   │
+    │             │                                                      │
+    │  ┌──────────┴──────────┐                                          │
+    │  │  CloudFront (CDN)  │                                          │
+    │  └──────────┬──────────┘                                          │
+    │             │                                                      │
+    └─────────────┼──────────────────────────────────────────────────────┘
+                  │
+                  ▼
+              Internet
+         (clients connect here)
+
+    CDK Stacks:
+        1. NetworkStack      → VPC, subnets, security groups
+        2. StorageStack      → S3 bucket, bucket policies
+        3. DatabaseStack     → OpenSearch/RDS (vector DB)
+        4. ComputeStack      → ECS Fargate (MCP server), ALB
+        5. IngestionStack    → Lambda function, S3 event trigger
+        6. CdnStack          → CloudFront distribution
+
+
+================================================================================
+SECTION 6: PROJECT FOLDER STRUCTURE
+================================================================================
+
+    project/
+    ├── HLD.txt                         ← This file
+    │
+    ├── mcp/                            ← MCP Server code
+    │   ├── server.py                   ← Main MCP server (FastMCP + upload endpoint)
+    │   ├── tools/
+    │   │   ├── __init__.py
+    │   │   ├── rag_search.py           ← Tool 1: RAG vector search
+    │   │   └── query_filesystem.py     ← Tool 2: Virtual filesystem
+    │   ├── services/
+    │   │   ├── __init__.py
+    │   │   ├── vector_db.py            ← Vector DB client (search, upsert)
+    │   │   ├── s3_client.py            ← S3 read/write operations
+    │   │   └── embeddings.py           ← Embedding generation
+    │   ├── models/
+    │   │   ├── __init__.py
+    │   │   └── schemas.py              ← Pydantic models
+    │   ├── config.py                   ← Environment config
+    │   ├── requirements.txt
+    │   └── Dockerfile
+    │
+    ├── ingestion/                      ← Ingestion Lambda/Fargate
+    │   ├── handler.py                  ← Lambda handler (S3 trigger)
+    │   ├── chunker.py                  ← Document chunking logic
+    │   ├── parser.py                   ← File format parser (md, pdf, txt)
+    │   ├── requirements.txt
+    │   └── Dockerfile
+    │
+    ├── infra/                          ← CDK Infrastructure
+    │   ├── app.py                      ← CDK app entry point
+    │   ├── stacks/
+    │   │   ├── __init__.py
+    │   │   ├── network_stack.py
+    │   │   ├── storage_stack.py
+    │   │   ├── database_stack.py
+    │   │   ├── compute_stack.py
+    │   │   ├── ingestion_stack.py
+    │   │   └── cdn_stack.py
+    │   ├── cdk.json
+    │   └── requirements.txt
+    │
+    └── test/                           ← Test scripts
+        ├── test_mcp_client.py          ← Test MCP tools via SDK
+        ├── test_upload.py              ← Test upload endpoint
+        ├── test_with_llm.py            ← Test tools with LLM (LangGraph)
+        └── requirements.txt
+
+
+================================================================================
+SECTION 7: TECH STACK
+================================================================================
+
+    Component           Technology
+    ─────────────────────────────────────────────────
+    MCP Server          Python, FastMCP, uvicorn
+    Upload API          FastAPI (mounted alongside MCP)
+    Vector DB           OpenSearch Serverless / pgvector
+    Object Storage      AWS S3
+    Ingestion           AWS Lambda (Python)
+    Embeddings          OpenAI text-embedding-3-small
+    Compute             ECS Fargate
+    Load Balancer       ALB
+    CDN                 CloudFront
+    IaC                 AWS CDK (Python)
+    Container           Docker
+    Auth (upload)       API Key (X-API-Key header)
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================
